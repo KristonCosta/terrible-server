@@ -1,20 +1,51 @@
 package main
 
 import (
+	"fmt"
+	"github.com/dgrijalva/jwt-go"
+	"github.com/dgrijalva/jwt-go/request"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
+	"time"
 )
 
-var upgrader = websocket.Upgrader{}
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	}}
+var signingKey = []byte("SUPER_SECRET_KEY")
 
-
-type server struct {
+type Server struct {
 	clients   map[*websocket.Conn]bool
 	broadcast chan []byte
 }
 
-func (server *server) handleConnections(w http.ResponseWriter, r *http.Request) {
+func (server *Server) fetchToken(w http.ResponseWriter, r *http.Request) {
+	token := jwt.New(jwt.SigningMethodHS256)
+	claims := make(jwt.MapClaims)
+	claims["exp"] = time.Now().Add(time.Second * 20).Unix()
+	claims["iat"] = time.Now().Unix()
+	token.Claims = claims
+	tokenString, _ := token.SignedString(signingKey)
+	w.Write([]byte(tokenString))
+}
+
+func (server *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
+	token, err := request.ParseFromRequest(r, request.AuthorizationHeaderExtractor,
+		func(token *jwt.Token) (interface{}, error) {
+			return signingKey, nil
+		})
+	if err == nil {
+		if !token.Valid {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, "Token is not valid.")
+			return
+		}
+	} else {
+		fmt.Fprint(w, "Invalid request.")
+		return
+	}
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf(err.Error())
@@ -39,7 +70,7 @@ func (server *server) handleConnections(w http.ResponseWriter, r *http.Request) 
 
 }
 
-func (server *server) handleMessages() {
+func (server *Server) handleMessages() {
 	for {
 		msg := <-server.broadcast
 		log.Printf("Received message: %v", msg)
@@ -57,9 +88,10 @@ func (server *server) handleMessages() {
 }
 
 func main() {
-	var serv server
+	var serv Server
 	serv.broadcast = make(chan []byte)
 	go serv.handleMessages()
 	http.HandleFunc("/chat", serv.handleConnections)
+	http.HandleFunc("/token", serv.fetchToken)
 	log.Fatal(http.ListenAndServe(":8123", nil))
 }
