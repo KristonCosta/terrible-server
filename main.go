@@ -1,76 +1,65 @@
 package main
 
 import (
-	"encoding/json"
-	"github.com/gorilla/mux"
-	"github.com/jinzhu/gorm"
-	_ "github.com/jinzhu/gorm/dialects/sqlite"
+	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
-	"strconv"
-	"time"
 )
 
-type Message struct {
-	Id      string
-	Content string
+var upgrader = websocket.Upgrader{}
+
+
+type server struct {
+	clients   map[*websocket.Conn]bool
+	broadcast chan []byte
 }
 
-type Messages []Message
-
-func get_messages(w http.ResponseWriter, r *http.Request) {
-	var messages Messages
-
-	db, err := gorm.Open("sqlite3", "./foo.db")
+func (server *server) handleConnections(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	db.Find(&messages)
-	json.NewEncoder(w).Encode(messages)
-}
-
-func save_message(w http.ResponseWriter, r *http.Request) {
-	var message Message
-
-	db, err := gorm.Open("sqlite3", "./foo.db")
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	decoder := json.NewDecoder(r.Body)
-	err = decoder.Decode(&message)
-	if err != nil {
-		http.Error(w, "Invalid post body.", http.StatusBadRequest)
+		log.Printf(err.Error())
 		return
 	}
-	message.Id = strconv.FormatInt(time.Now().UnixNano(), 10)
-	db.Create(&message)
-	w.Write([]byte("Success!"))
+	log.Printf("Client connected.")
+	defer ws.Close()
+	if server.clients == nil {
+		server.clients = make(map[*websocket.Conn]bool)
+	}
+	server.clients[ws] = true
+	for {
+		_, msg, err := ws.ReadMessage()
+		if err != nil {
+			log.Printf("Client Error: %v", err)
+			delete(server.clients, ws)
+			break
+		}
+		log.Printf("Client send message: %v", msg)
+		server.broadcast <- msg
+	}
+
+}
+
+func (server *server) handleMessages() {
+	for {
+		msg := <-server.broadcast
+		log.Printf("Received message: %v", msg)
+		for client := range server.clients {
+			w, err := client.NextWriter(websocket.TextMessage)
+			if err != nil {
+				log.Printf("Error: %v", err)
+				client.Close()
+				delete(server.clients, client)
+			}
+			w.Write(msg)
+			w.Close()
+		}
+	}
 }
 
 func main() {
-	db, err := gorm.Open("sqlite3", "./foo.db")
-
-	if err != nil {
-		panic(err)
-	}
-	defer db.Close()
-
-	db.AutoMigrate(&Message{})
-
-	router := mux.NewRouter().StrictSlash(true)
-	router.
-		Methods("POST").
-		Path("/messages").
-		HandlerFunc(save_message)
-
-	router.
-		Methods("GET").
-		Path("/messages").
-		HandlerFunc(get_messages)
-
-	log.Fatal(http.ListenAndServe(":8123", router))
+	var serv server
+	serv.broadcast = make(chan []byte)
+	go serv.handleMessages()
+	http.HandleFunc("/chat", serv.handleConnections)
+	log.Fatal(http.ListenAndServe(":8123", nil))
 }
